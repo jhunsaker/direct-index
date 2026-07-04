@@ -1,0 +1,47 @@
+# Sample configuration. Copy and edit for your own portfolio.
+#
+# Everything here runs offline against the built-in paper broker and the CSV
+# constituent files under examples/. To go live, change [broker] to ibkr and
+# point the indexes at real iShares holdings URLs (see README).
+
+[broker]
+type = "paper"
+paper_state_path = "state/paper_account.json"
+
+[rebalance]
+drift_band = 0.005       # trade a symbol only once it drifts >= 0.5% from target
+min_trade_value = 50     # never place an order smaller than $50
+allow_fractional = true  # direct indexing needs fractional shares at small size
+
+[tax]
+strategy = "hifo"        # always sell the highest-cost lot to minimise gains
+ledger_path = "state/lots.json"
+
+# Two indexes, 60/40. Allocations sum to 1.0 here, so the portfolio is fully
+# invested; make them sum to less than 1 to hold a deliberate cash position.
+# Overlapping constituents across indexes are automatically blended into one
+# combined target per symbol, so shares flow freely between indexes.
+
+[[index]]
+name = "us_large_cap"
+allocation = 0.6
+provider = "csv"
+# A [index.csv] subtable after [[index]] attaches to the index just above it.
+[index.csv]
+path = "examples/us_large_cap.csv"
+
+[[index]]
+name = "developed_intl"
+allocation = 0.4
+provider = "csv"
+[index.csv]
+path = "examples/developed_intl.csv"
+
+# --- To pull real iShares holdings instead of a static CSV, swap in: ---
+# [[index]]
+# name = "us_large_cap"
+# allocation = 0.6
+# provider = "ishares"
+# [index.ishares]
+# holdings_url = "https://www.ishares.com/us/products/239726/.../IVV_holdings.ajax?fileType=csv&fileName=IVV_holdings&dataType=fund"
+# cache_path = "data/ivv_holdings.csv"

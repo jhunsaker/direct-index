@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# direct-index local state (paper account, tax-lot ledger, cached holdings)
+state/
+data/

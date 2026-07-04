@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "direct-index"
+version = "0.1.0"
+description = "Manage index investments by directly holding constituents at a brokerage."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "GPL-3.0-or-later" }
+dependencies = []
+
+[project.optional-dependencies]
+# Only the Interactive Brokers adapter needs a third-party package. Everything
+# else -- rebalance, tax, config, the paper broker, and both constituent
+# providers (the iShares one uses stdlib urllib) -- runs on the stdlib alone.
+ibkr = ["ib_async>=1.0"]
+dev = ["pytest>=8", "ib_async>=1.0"]
+
+[project.scripts]
+direct-index = "direct_index.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["direct_index*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
