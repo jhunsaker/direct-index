@@ -57,11 +57,18 @@ class TargetWeight:
 
 @dataclass(frozen=True)
 class Position:
-    """A holding as reported by the broker."""
+    """A holding as reported by the broker.
+
+    ``avg_cost`` is the broker's average cost per share when it reports one
+    (IBKR does); it is ``None`` for brokers that don't (the paper broker).
+    Reconciliation uses it as the cost basis for surplus shares it has to
+    create a lot for.
+    """
 
     symbol: str
     quantity: Decimal
     market_price: Decimal
+    avg_cost: Decimal | None = None
 
     @property
     def market_value(self) -> Decimal:

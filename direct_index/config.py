@@ -72,6 +72,18 @@ class TaxConfig:
 
 
 @dataclass(frozen=True)
+class ReconcileConfig:
+    # Share differences at or below this are treated as equal (fractional dust).
+    tolerance: Decimal = Decimal("0.000001")
+    # Which lots to retire when the ledger holds phantom shares the broker
+    # doesn't; a correction, not a sale, so this is not HIFO by default.
+    shortfall_policy: str = "fifo"
+    # Refuse to execute a rebalance while the ledger and broker disagree, so we
+    # never trade (and mis-attribute tax lots) on a stale ledger.
+    block_rebalance: bool = True
+
+
+@dataclass(frozen=True)
 class IndexConfig:
     name: str
     allocation: Decimal
@@ -87,6 +99,7 @@ class Config:
     rebalance: RebalanceConfig
     tax: TaxConfig
     indexes: tuple[IndexConfig, ...]
+    reconcile: ReconcileConfig = field(default_factory=ReconcileConfig)
     # Directory of the config file; used to resolve every relative path.
     base_dir: Path = field(default_factory=Path.cwd)
 
@@ -118,6 +131,7 @@ def _parse(raw: dict, *, base_dir: Path) -> Config:
     broker = _parse_broker(raw.get("broker", {}))
     rebalance = _parse_rebalance(raw.get("rebalance", {}))
     tax = _parse_tax(raw.get("tax", {}))
+    reconcile = _parse_reconcile(raw.get("reconcile", {}))
     indexes = _parse_indexes(raw.get("index", []))
 
     if not indexes:
@@ -138,6 +152,7 @@ def _parse(raw: dict, *, base_dir: Path) -> Config:
         broker=broker,
         rebalance=rebalance,
         tax=tax,
+        reconcile=reconcile,
         indexes=indexes,
         base_dir=base_dir,
     )
@@ -184,6 +199,22 @@ def _parse_tax(raw: dict) -> TaxConfig:
     return TaxConfig(
         strategy=strategy,
         ledger_path=raw.get("ledger_path", "state/lots.json"),
+    )
+
+
+def _parse_reconcile(raw: dict) -> ReconcileConfig:
+    tolerance = dec(raw.get("tolerance", "0.000001"))
+    if tolerance < 0:
+        raise ConfigError("reconcile.tolerance must be >= 0")
+    policy = raw.get("shortfall_policy", "fifo").lower()
+    if policy not in ("fifo", "lifo", "hifo"):
+        raise ConfigError(
+            f"reconcile.shortfall_policy {policy!r} must be fifo|lifo|hifo"
+        )
+    return ReconcileConfig(
+        tolerance=tolerance,
+        shortfall_policy=policy,
+        block_rebalance=bool(raw.get("block_rebalance", True)),
     )
 
 

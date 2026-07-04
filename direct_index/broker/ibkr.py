@@ -80,6 +80,9 @@ class IBKRBroker(BrokerBase):
                 symbol=symbol,
                 quantity=dec(item.position),
                 market_price=dec(item.marketPrice),
+                # IBKR reports an average cost per share; reconciliation uses it
+                # as the basis for any surplus shares it has to book.
+                avg_cost=dec(item.averageCost) if item.averageCost else None,
             )
         return Account(cash=cash, positions=positions)
 

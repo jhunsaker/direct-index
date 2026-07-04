@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from .config import Config, ConfigError, load_config
 from .indexes import build_provider
 from .models import BUY, TargetWeight, dec
 from .rebalance import blend_targets, drift_report, plan_rebalance
+from .tax import apply_reconciliation, diff_positions
 from .tax.lots import LotLedger
 
 DEFAULT_CONFIG = "direct-index.toml"
@@ -117,6 +119,26 @@ def cmd_rebalance(args) -> int:
         if not plan.trades:
             return 0
 
+        # Never trade on a stale ledger: mis-synced lots corrupt tax accounting
+        # and can leave sells with no lot attribution.
+        if not args.skip_reconcile_check and config.reconcile.block_rebalance:
+            report = diff_positions(
+                ledger,
+                {s: p.quantity for s, p in account.positions.items()},
+                config.reconcile.tolerance,
+            )
+            if not report.in_sync:
+                print(
+                    "\nerror: ledger and broker are out of sync; refusing to "
+                    "execute.\n  Run `direct-index reconcile --apply` first, or "
+                    "pass --skip-reconcile-check to override.",
+                    file=sys.stderr,
+                )
+                for d in report.mismatches:
+                    print(f"    {d.symbol}: ledger {d.ledger_qty} vs broker "
+                          f"{d.broker_qty} ({d.kind})", file=sys.stderr)
+                return 3
+
         print("\nExecuting...")
         ledger_path = config.resolve(config.tax.ledger_path)
         for trade in plan.trades:
@@ -153,6 +175,57 @@ def cmd_lots(args) -> int:
             print(f"  {lot.symbol:<8} {lot.lot_id:<14} {lot.quantity:>12} "
                   f"{_money(lot.cost_per_share):>10} {lot.acquired.isoformat():>12}")
     return 0
+
+
+def cmd_reconcile(args) -> int:
+    config = _load(args)
+    ledger_path = config.resolve(config.tax.ledger_path)
+    ledger = LotLedger.load(ledger_path)
+
+    with build_broker(config) as broker:
+        account = broker.get_account()
+        symbols = sorted(set(ledger.symbols()) | set(account.positions))
+        prices = broker.get_prices(symbols)
+
+    broker_qty = {s: p.quantity for s, p in account.positions.items()}
+    avg_costs = {
+        s: p.avg_cost for s, p in account.positions.items() if p.avg_cost is not None
+    }
+    report = diff_positions(ledger, broker_qty, config.reconcile.tolerance)
+    _print_reconcile(report)
+
+    if not args.apply:
+        if not report.in_sync:
+            print("\n(diagnostic only -- pass --apply to correct the ledger)")
+        return 0
+    if report.in_sync:
+        return 0
+
+    adjustments = apply_reconciliation(
+        ledger,
+        report,
+        prices=prices,
+        avg_costs=avg_costs,
+        when=date.today(),
+        shortfall_policy=config.reconcile.shortfall_policy,
+    )
+    ledger.save(ledger_path)
+    print("\nApplied:")
+    for a in adjustments:
+        print(f"  {a.symbol}: {a.action} {a.quantity} -- {a.detail}")
+    return 0
+
+
+def _print_reconcile(report) -> None:
+    matched = len(report.discrepancies) - len(report.mismatches)
+    if report.in_sync:
+        print(f"Ledger and broker are in sync ({matched} symbols).")
+        return
+    print(f"  {'SYMBOL':<8} {'LEDGER':>14} {'BROKER':>14} {'DELTA':>14}  STATUS")
+    for d in report.mismatches:
+        print(f"  {d.symbol:<8} {d.ledger_qty:>14} {d.broker_qty:>14} "
+              f"{d.delta:>+14}  {d.kind}")
+    print(f"\n  {matched} matched, {len(report.mismatches)} out of sync")
 
 
 def cmd_set_prices(args) -> int:
@@ -213,7 +286,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reb = sub.add_parser("rebalance", help="plan (and optionally execute) trades")
     reb.add_argument("--execute", action="store_true", help="submit the orders")
+    reb.add_argument(
+        "--skip-reconcile-check", action="store_true",
+        help="execute even if the ledger and broker are out of sync (unsafe)",
+    )
     reb.set_defaults(func=cmd_rebalance)
+
+    rec = sub.add_parser("reconcile", help="check ledger vs. broker share counts")
+    rec.add_argument(
+        "--apply", action="store_true",
+        help="correct the ledger to match the broker (adds/retires lots)",
+    )
+    rec.set_defaults(func=cmd_reconcile)
 
     sub.add_parser("fetch-holdings", help="refresh/cache constituent data").set_defaults(
         func=cmd_fetch_holdings

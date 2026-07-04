@@ -79,12 +79,45 @@ direct-index lots                          # open tax lots
 | `direct-index targets` | Show the blended target weight per symbol |
 | `direct-index status` | Current holdings vs. target, with drift |
 | `direct-index rebalance` | Plan trades (dry run); `--execute` to submit |
+| `direct-index reconcile` | Check the ledger vs. broker share counts; `--apply` to correct |
 | `direct-index fetch-holdings` | Refresh/cache each index's constituent data |
 | `direct-index lots [SYMBOL]` | Show open tax lots |
 | `direct-index set-prices FILE` | (paper broker) load a `symbol,price` CSV |
 
 All commands take `-c/--config PATH` (default `direct-index.toml`). `rebalance`
 is a **dry run by default** — it never sends orders without `--execute`.
+
+## Reconciliation
+
+The lot ledger is only correct if every share change flows through it — but real
+accounts drift for reasons the tool never sees: dividend reinvestment, splits,
+manual trades, transfers in, or a missed fill. When the ledger and broker
+disagree, HIFO selection and realised-gain math are wrong.
+
+`reconcile` compares the ledger's share counts against the broker's and
+classifies each symbol as **matched**, a **surplus** (broker holds more than
+the ledger knows), or a **shortfall** (the ledger holds phantom shares). It is
+read-only by default:
+
+```bash
+direct-index reconcile            # diagnostic report
+direct-index reconcile --apply    # correct the ledger to match the broker
+```
+
+`--apply` restores the invariant `ledger == broker` per symbol:
+
+- **surplus** → open a new lot for the extra shares, priced at the broker's
+  average cost when reported (IBKR) or the current price otherwise, dated today
+  (an estimate, flagged in the output). Shares with no available basis are
+  *skipped*, never fabricated.
+- **shortfall** → retire shares under a documented policy (FIFO by default,
+  configurable), which realises no gain because this is a correction, not a
+  sale.
+
+`rebalance --execute` runs this check first and **refuses to trade while out of
+sync** (exit code 3), so a stale ledger can't cause mis-attributed tax lots.
+Override with `--skip-reconcile-check`, or set `reconcile.block_rebalance =
+false`.
 
 ## Configuration
 
@@ -125,9 +158,9 @@ tests; the two external integrations are written against real APIs but require
 live services to exercise.
 
 - ✅ **Tested & runnable offline:** the rebalance engine (blending, drift,
-  trade generation), the HIFO tax ledger, config parsing, the CSV provider, the
-  iShares CSV *parser*, and the paper broker — exercised by 22 unit tests and
-  the end-to-end CLI flow above.
+  trade generation), the HIFO tax ledger, ledger↔broker reconciliation, config
+  parsing, the CSV provider, the iShares CSV *parser*, and the paper broker —
+  exercised by 32 unit tests and the end-to-end CLI flows above.
 - ⚠️ **Written, needs live smoke test:** the Interactive Brokers adapter
   ([`broker/ibkr.py`](direct_index/broker/ibkr.py)) needs a running Gateway; its
   market-data and fractional-order paths in particular should be validated on a
@@ -138,6 +171,7 @@ live services to exercise.
 ## Safety notes
 
 This is early-stage software that can place real trades. It has no order-rate
-limiting, no market-hours guard, no partial-fill retry loop, and no
-reconciliation between the local lot ledger and broker-reported share counts —
-all of which you want before trading meaningful capital. Start on paper.
+limiting, no market-hours guard, and no partial-fill retry loop — all of which
+you want before trading meaningful capital. It *does* reconcile the local lot
+ledger against broker-reported share counts and refuses to rebalance while they
+disagree (see [Reconciliation](#reconciliation)). Start on paper.

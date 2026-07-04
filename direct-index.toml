@@ -17,6 +17,11 @@ allow_fractional = true  # direct indexing needs fractional shares at small size
 strategy = "hifo"        # always sell the highest-cost lot to minimise gains
 ledger_path = "state/lots.json"
 
+[reconcile]
+tolerance = 0.000001     # share diffs at/below this are treated as equal (dust)
+shortfall_policy = "fifo"  # which lots to retire for phantom shares (fifo|lifo|hifo)
+block_rebalance = true   # refuse to execute while ledger and broker disagree
+
 # Two indexes, 60/40. Allocations sum to 1.0 here, so the portfolio is fully
 # invested; make them sum to less than 1 to hold a deliberate cash position.
 # Overlapping constituents across indexes are automatically blended into one

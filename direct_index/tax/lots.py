@@ -26,34 +26,57 @@ from pathlib import Path
 from ..models import Fill, Lot, LotSale, dec
 
 
-def select_hifo(lots: list[Lot], quantity: Decimal) -> list[LotSale]:
-    """Choose lots to satisfy a sale of ``quantity`` shares, highest cost first.
+# Supported lot-ordering policies. HIFO drives real sales (minimise gains);
+# FIFO/LIFO exist only so reconciliation can correct phantom shares by a chosen,
+# documented rule.
+_LOT_ORDERINGS = {
+    # Highest cost first; oldest, then lot_id, break ties deterministically.
+    "hifo": (lambda l: (-l.cost_per_share, l.acquired, l.lot_id), False),
+    "fifo": (lambda l: (l.acquired, l.lot_id), False),
+    "lifo": (lambda l: (l.acquired, l.lot_id), True),
+}
 
-    Returns per-lot sale instructions (a lot may be split). Raises ``ValueError``
-    if the lots do not hold enough shares -- the caller must never ask to sell
-    more than it holds.
+
+def select_lots(
+    lots: list[Lot], quantity: Decimal, policy: str = "hifo"
+) -> list[LotSale]:
+    """Choose lots totalling ``quantity`` shares under the given ordering policy.
+
+    Returns per-lot instructions (a lot may be split). Raises ``ValueError`` if
+    the lots do not hold enough shares -- the caller must never ask for more
+    than it holds -- or if ``policy`` is unknown.
     """
+    quantity = dec(quantity)
     if quantity <= 0:
         return []
+    if policy not in _LOT_ORDERINGS:
+        raise ValueError(
+            f"unknown lot policy {policy!r}; expected one of {sorted(_LOT_ORDERINGS)}"
+        )
     available = sum((lot.quantity for lot in lots), Decimal(0))
     if quantity > available:
         raise ValueError(
-            f"cannot sell {quantity} shares; only {available} held across lots"
+            f"cannot select {quantity} shares; only {available} held across lots"
         )
 
-    # Highest cost per share first; oldest first to break ties deterministically.
-    ordered = sorted(lots, key=lambda l: (-l.cost_per_share, l.acquired, l.lot_id))
+    key, reverse = _LOT_ORDERINGS[policy]
+    ordered = sorted(lots, key=key, reverse=reverse)
     remaining = quantity
-    sales: list[LotSale] = []
+    picks: list[LotSale] = []
     for lot in ordered:
         if remaining <= 0:
             break
         take = min(lot.quantity, remaining)
-        sales.append(
+        picks.append(
             LotSale(lot_id=lot.lot_id, quantity=take, cost_per_share=lot.cost_per_share)
         )
         remaining -= take
-    return sales
+    return picks
+
+
+def select_hifo(lots: list[Lot], quantity: Decimal) -> list[LotSale]:
+    """Choose lots to satisfy a sale of ``quantity`` shares, highest cost first."""
+    return select_lots(lots, quantity, "hifo")
 
 
 def estimate_realized_gain(sales: list[LotSale], sale_price: Decimal) -> Decimal:
@@ -149,6 +172,22 @@ class LotLedger:
         sales = select_hifo(self.lots_for(symbol), dec(quantity))
         self._consume(symbol, sales)
         return sales
+
+    def remove_shares(
+        self, symbol: str, quantity: Decimal, policy: str = "fifo"
+    ) -> list[LotSale]:
+        """Drop ``quantity`` shares from the ledger *without* realising a gain.
+
+        Used by reconciliation to correct phantom shares (the ledger thinks we
+        hold more than the broker reports). This is a bookkeeping correction,
+        not a disposal, so no realised gain is computed; ``policy`` only decides
+        which lots to retire and defaults to FIFO to mirror the usual broker
+        default when specific lots weren't identified.
+        """
+        symbol = symbol.upper()
+        removed = select_lots(self.lots_for(symbol), dec(quantity), policy)
+        self._consume(symbol, removed)
+        return removed
 
     def apply_fill(self, fill: Fill) -> list[LotSale]:
         """Update the ledger from an executed fill.
