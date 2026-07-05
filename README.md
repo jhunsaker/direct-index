@@ -57,7 +57,7 @@ so the entire pipeline runs with zero external services or credentials.
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
-pytest                                    # 22 tests, all offline
+pytest                                    # 42 tests, all offline
 
 # Blend the two example indexes into one target
 direct-index targets
@@ -149,7 +149,21 @@ suppress churn on small moves.
    holdings_url = "https://www.ishares.com/us/products/239726/.../IVV_holdings.ajax?fileType=csv&fileName=IVV_holdings&dataType=fund"
    ```
 
-Always test against a **paper account** first.
+Always test against a **paper account** first. Before wiring the gateway into
+the app, run the standalone smoke test to verify connectivity and the adapter
+end-to-end (it drives the same `IBKRBroker` the app uses and touches neither
+your config nor the lot ledger):
+
+```bash
+# Read-only checks: connect, account + cash, prices
+python scripts/ibkr_smoke_test.py --port 7497
+
+# Full round-trip: buys then sells 1 share to return to flat
+python scripts/ibkr_smoke_test.py --port 7497 --allow-order --symbol F
+```
+
+Orders require the explicit `--allow-order` flag; on a live port they
+additionally require `--allow-live`.
 
 ## Status: what's verified vs. what needs live testing
 
@@ -159,14 +173,17 @@ live services to exercise.
 
 - ✅ **Tested & runnable offline:** the rebalance engine (blending, drift,
   trade generation), the HIFO tax ledger, ledger↔broker reconciliation, config
-  parsing, the CSV provider, the iShares CSV *parser*, and the paper broker —
-  exercised by 32 unit tests and the end-to-end CLI flows above.
-- ⚠️ **Written, needs live smoke test:** the Interactive Brokers adapter
-  ([`broker/ibkr.py`](direct_index/broker/ibkr.py)) needs a running Gateway; its
-  market-data and fractional-order paths in particular should be validated on a
-  paper account. The iShares *network fetch* depends on BlackRock's endpoint and
-  CSV layout, which drift over time — re-check the parser against a live
-  download.
+  parsing, the CSV provider, the iShares CSV *parser*, the paper broker, and the
+  IBKR adapter's *translation logic* (account/price/order mapping, NaN handling,
+  average-fill math, timeout+cancel — driven by a fake `ib_async` client) —
+  exercised by 42 unit tests and the end-to-end CLI flows above.
+- ⚠️ **Needs a live paper gateway to verify:** the IBKR socket round-trip
+  itself — does the gateway connect, is the account funded, does market data
+  arrive, does IBKR accept a (possibly fractional) order and report the fill.
+  Run [`scripts/ibkr_smoke_test.py`](scripts/ibkr_smoke_test.py) against a paper
+  account (see above). The iShares *network fetch* depends on BlackRock's
+  endpoint and CSV layout, which drift over time — re-check the parser against a
+  live download.
 
 ## Safety notes
 

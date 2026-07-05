@@ -43,6 +43,13 @@ class IBKRConfig:
     port: int = 7497  # 7497 = paper TWS, 7496 = live TWS, 4002/4001 = Gateway
     client_id: int = 1
     account: str = ""  # required only when the login has multiple accounts
+    # Market-data type for price requests: 1 live, 2 frozen, 3 delayed,
+    # 4 delayed-frozen. Defaults to delayed so paper accounts without a live
+    # data subscription still return usable prices.
+    market_data_type: int = 3
+    # Max seconds to wait for an order to reach a terminal state before
+    # cancelling it and failing, so execute() can never hang indefinitely.
+    order_timeout: float = 60.0
 
 
 @dataclass(frozen=True)
@@ -163,11 +170,16 @@ def _parse_broker(raw: dict) -> BrokerConfig:
     if btype not in ("paper", "ibkr"):
         raise ConfigError(f"unknown broker type: {btype!r} (expected paper|ibkr)")
     ib_raw = raw.get("ibkr", {})
+    md_type = int(ib_raw.get("market_data_type", 3))
+    if md_type not in (1, 2, 3, 4):
+        raise ConfigError("broker.ibkr.market_data_type must be 1, 2, 3, or 4")
     ibkr = IBKRConfig(
         host=ib_raw.get("host", "127.0.0.1"),
         port=int(ib_raw.get("port", 7497)),
         client_id=int(ib_raw.get("client_id", 1)),
         account=ib_raw.get("account", ""),
+        market_data_type=md_type,
+        order_timeout=float(ib_raw.get("order_timeout", 60.0)),
     )
     return BrokerConfig(
         type=btype,

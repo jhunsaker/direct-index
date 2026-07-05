@@ -3,10 +3,11 @@
 This is the real-world broker implementation. It talks to a running **Trader
 Workstation** or **IB Gateway** over the local socket API -- there is no
 cloud REST endpoint, so a gateway process must be running and logged in for any
-of this to work. Because that requires a live session, this adapter is written
-out in full but is the one part of the system that cannot be exercised by the
-offline test suite; treat the market-data and fractional-order paths as
-needing a paper-account smoke test before you trust them with real money.
+of this to work. The translation logic here (account/price/order mapping, NaN
+handling, average-fill math, the execute timeout/cancel path) is covered offline
+by ``tests/test_ibkr_adapter.py`` via a fake ib_async client; the live socket
+round-trip must be verified against a paper account with
+``scripts/ibkr_smoke_test.py`` before you trust it with real money.
 
 Install the integration with::
 
@@ -27,13 +28,14 @@ Per-order specific-lot assignment is not reliably available through this API.
 
 from __future__ import annotations
 
+import time
 from decimal import Decimal
 
 from ..config import IBKRConfig
 from ..models import Account, Fill, Position, Trade, dec
 from .base import BrokerBase
 
-# Fields on the account summary that represent spendable cash.
+# accountValues() tag holding spendable cash in the account's base currency.
 _CASH_TAG = "TotalCashValue"
 
 
@@ -58,6 +60,10 @@ class IBKRBroker(BrokerBase):
             clientId=self.cfg.client_id,
             readonly=False,
         )
+        # Paper accounts usually lack a live market-data subscription, so ask
+        # for delayed data (type 3) by default; otherwise reqTickers returns NaN
+        # and get_prices comes back empty.
+        self._ib.reqMarketDataType(self.cfg.market_data_type)
 
     def disconnect(self) -> None:
         if self._ib is not None and self._ib.isConnected():
@@ -87,7 +93,9 @@ class IBKRBroker(BrokerBase):
         return Account(cash=cash, positions=positions)
 
     def _cash_balance(self) -> Decimal:
-        for row in self.ib.accountSummary(self.cfg.account or ""):
+        # accountValues() is primed automatically on connect (reqAccountUpdates);
+        # accountSummary() would need a separate reqAccountSummary call first.
+        for row in self.ib.accountValues(self.cfg.account or ""):
             if row.tag == _CASH_TAG and row.currency in ("USD", "BASE", ""):
                 return dec(row.value)
         return Decimal(0)
@@ -98,7 +106,12 @@ class IBKRBroker(BrokerBase):
 
         contracts = [Stock(s.upper(), "SMART", "USD") for s in symbols]
         self.ib.qualifyContracts(*contracts)
-        tickers = self.ib.reqTickers(*contracts)
+        # Drop anything IBKR couldn't resolve (conId stays 0) so one unknown
+        # ticker doesn't fail the whole batch.
+        qualified = [c for c in contracts if c.conId]
+        if not qualified:
+            return {}
+        tickers = self.ib.reqTickers(*qualified)
         prices: dict[str, Decimal] = {}
         for ticker in tickers:
             price = _usable_price(ticker)
@@ -117,9 +130,19 @@ class IBKRBroker(BrokerBase):
             order.account = self.cfg.account
 
         ib_trade = self.ib.placeOrder(contract, order)
-        # Block until the order reaches a terminal state.
-        while not ib_trade.isDone():
-            self.ib.waitOnUpdate(timeout=5)
+        # Wait for a terminal state, but never indefinitely: an unfilled order
+        # (market closed, no liquidity) would otherwise hang forever. On timeout
+        # we cancel so we don't leave a stray working order behind.
+        deadline = time.monotonic() + self.cfg.order_timeout
+        while not ib_trade.isDone() and time.monotonic() < deadline:
+            self.ib.waitOnUpdate(timeout=1)
+        if not ib_trade.isDone():
+            self.ib.cancelOrder(order)
+            raise TimeoutError(
+                f"IBKR order for {trade.symbol} did not complete within "
+                f"{self.cfg.order_timeout}s (status {ib_trade.orderStatus.status}); "
+                "cancelled"
+            )
 
         filled = sum((dec(f.execution.shares) for f in ib_trade.fills), Decimal(0))
         avg_price = _avg_fill_price(ib_trade)
